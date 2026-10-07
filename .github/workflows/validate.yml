@@ -1,0 +1,115 @@
+name: Validate & Security Scan
+
+# Runs on every push and pull request. No Azure credentials needed:
+# everything here is static analysis and offline tests.
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BICEP_VERSION: v0.48.1   # pinned so results are repeatable
+  CHECKOV_VERSION: 3.3.25
+
+jobs:
+  bicep:
+    name: Bicep lint & build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Bicep CLI
+        run: |
+          curl -sSLo bicep "https://github.com/Azure/bicep/releases/download/${BICEP_VERSION}/bicep-linux-x64"
+          chmod +x bicep
+          sudo mv bicep /usr/local/bin/bicep
+          bicep --version
+
+      - name: Lint (security rules in bicepconfig.json fail the build)
+        run: bicep lint infra/main.bicep
+
+      - name: Build and check azuredeploy.json is up to date
+        run: |
+          bicep build infra/main.bicep --outfile /tmp/azuredeploy.json
+          # Ignore the generator stamp; compare the actual template
+          if ! diff <(jq 'del(.metadata._generator)' /tmp/azuredeploy.json) \
+                    <(jq 'del(.metadata._generator)' infra/azuredeploy.json) > /dev/null; then
+            echo "::error::infra/azuredeploy.json is out of date. Run: bicep build infra/main.bicep --outfile infra/azuredeploy.json"
+            exit 1
+          fi
+          echo "azuredeploy.json matches main.bicep"
+
+  checkov:
+    name: Checkov security scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write   # lets results appear in the repo's Security tab
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install Checkov
+        run: pip install "checkov==${CHECKOV_VERSION}"
+
+      - name: Scan infrastructure code
+        run: |
+          checkov --config-file .checkov.yaml -d infra \
+            -o cli -o sarif --output-file-path console,results.sarif
+
+      - name: Upload results to GitHub Security tab
+        if: always() && hashFiles('results.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: results.sarif
+          category: checkov
+
+  powershell:
+    name: PowerShell analysis & tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          if (-not (Get-Module -ListAvailable -Name PSScriptAnalyzer)) {
+            Install-Module PSScriptAnalyzer -Scope CurrentUser -Force
+          }
+          $findings = Invoke-ScriptAnalyzer -Path ./scripts -Recurse -Settings ./PSScriptAnalyzerSettings.psd1
+          $findings | Format-Table -AutoSize
+          if ($findings) { throw "PSScriptAnalyzer found $($findings.Count) issue(s)." }
+          Write-Host 'PSScriptAnalyzer: no issues.'
+
+      - name: Test-SecurityBaseline passes a secure environment
+        shell: bash
+        run: |
+          chmod +x tests/fake-az/az
+          PATH="$PWD/tests/fake-az:$PATH" FAKE_SCENARIO=secure \
+            pwsh -NoProfile -File scripts/Test-SecurityBaseline.ps1 -ResourceGroup rg-test
+
+      - name: Test-SecurityBaseline catches an insecure environment
+        shell: bash
+        run: |
+          chmod +x tests/fake-az/az
+          set +e
+          PATH="$PWD/tests/fake-az:$PATH" FAKE_SCENARIO=insecure \
+            pwsh -NoProfile -File scripts/Test-SecurityBaseline.ps1 -ResourceGroup rg-test
+          code=$?
+          set -e
+          if [ "$code" -ne 1 ]; then
+            echo "::error::Expected the insecure scenario to fail (exit 1) but got exit $code"
+            exit 1
+          fi
+          echo "Insecure environment was correctly flagged."
