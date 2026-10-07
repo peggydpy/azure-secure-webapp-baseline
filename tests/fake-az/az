@@ -1,0 +1,74 @@
+#!/usr/bin/env python3
+"""
+Fake Azure CLI used only by CI tests.
+
+It returns canned JSON for the commands that scripts/Test-SecurityBaseline.ps1 runs,
+so the test logic can be checked on every push without an Azure subscription.
+
+  FAKE_SCENARIO=secure      -> a correctly hardened environment (expect exit 0)
+  FAKE_SCENARIO=insecure    -> a misconfigured environment       (expect exit 1)
+"""
+import json
+import os
+import sys
+
+args = sys.argv[1:]
+insecure = os.environ.get("FAKE_SCENARIO", "secure") == "insecure"
+
+APP_ID = "/subscriptions/0000/resourceGroups/rg-test/providers/Microsoft.Web/sites/app-test"
+KV_ID = "/subscriptions/0000/resourceGroups/rg-test/providers/Microsoft.KeyVault/vaults/kv-test"
+SQL_ID = "/subscriptions/0000/resourceGroups/rg-test/providers/Microsoft.Sql/servers/sql-test"
+
+
+def starts(*words):
+    return list(args[: len(words)]) == list(words)
+
+
+def reply(obj):
+    print(json.dumps(obj))
+    sys.exit(0)
+
+
+if starts("resource", "list"):
+    reply([
+        {"id": APP_ID, "name": "app-test", "type": "Microsoft.Web/sites"},
+        {"id": KV_ID, "name": "kv-test", "type": "Microsoft.KeyVault/vaults"},
+        {"id": SQL_ID, "name": "sql-test", "type": "Microsoft.Sql/servers"},
+    ])
+if starts("webapp", "show"):
+    reply({"httpsOnly": not insecure, "identity": {"type": "SystemAssigned"}})
+if starts("webapp", "config", "show"):
+    reply({
+        "minTlsVersion": "1.0" if insecure else "1.2",
+        "ftpsState": "AllAllowed" if insecure else "Disabled",
+        "remoteDebuggingEnabled": insecure,
+    })
+if starts("webapp", "config", "appsettings", "list"):
+    settings = [
+        {"name": "APPLICATIONINSIGHTS_CONNECTION_STRING", "value": "InstrumentationKey=00000000"},
+        {"name": "SQL_CONNECTION_STRING", "value": "Server=tcp:sql-test;Authentication=Active Directory Managed Identity;"},
+        {"name": "EXTERNAL_API_KEY", "value": "plain-text-key" if insecure else "@Microsoft.KeyVault(VaultName=kv-test;SecretName=ExternalApiKey)"},
+    ]
+    if insecure:
+        settings.append({"name": "LEGACY_DB", "value": "Server=tcp:sql-test;User ID=admin;Password=NotARealPassword"})
+    reply(settings)
+if starts("resource", "show"):
+    reply({"properties": {"allow": insecure}})
+if starts("monitor", "diagnostic-settings", "list"):
+    reply([] if insecure else [{"name": "to-log-analytics"}])
+if starts("sql", "server", "ad-only-auth", "get"):
+    reply({"azureAdOnlyAuthentication": not insecure})
+if starts("sql", "server", "audit-policy", "show"):
+    reply({"state": "Disabled" if insecure else "Enabled"})
+if starts("sql", "server", "firewall-rule", "list"):
+    rules = [{"name": "AllowAzureServices", "startIpAddress": "0.0.0.0", "endIpAddress": "0.0.0.0"}]
+    if insecure:
+        rules.append({"name": "AllowAll", "startIpAddress": "1.0.0.0", "endIpAddress": "255.255.255.255"})
+    reply(rules)
+if starts("sql", "server", "show"):
+    reply({"minimalTlsVersion": "1.0" if insecure else "1.2"})
+if starts("keyvault", "show"):
+    reply({"properties": {"enableRbacAuthorization": not insecure, "enableSoftDelete": True, "enablePurgeProtection": True}})
+
+sys.stderr.write("fake az: unhandled command: az " + " ".join(args) + "\n")
+sys.exit(1)
