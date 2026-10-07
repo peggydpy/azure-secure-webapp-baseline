@@ -1,0 +1,20 @@
+# Checkov configuration
+# ---------------------------------------------------------------------------
+# Most suppressions live next to the resource in infra/main.bicep, each with a
+# reason. The checks below are skipped here instead because Checkov ignores
+# inline skip comments for them in Bicep files. Each one is explained, and
+# every risk ID is documented in docs/accepted-risks.md.
+framework:
+  - bicep
+compact: true
+quiet: true
+skip-check:
+  # CKV_AZURE_23: False positive. Auditing is enabled at server level
+  # (sqlAuditing resource) and Checkov doesn't link child resources in Bicep.
+  - CKV_AZURE_23
+  # CKV_AZURE_24: Audit logs go to Log Analytics; retention is controlled
+  # on the workspace (30 days dev / 90 days prod). See RISK-05.
+  - CKV_AZURE_24
+  # CKV_AZURE_25: Defender for SQL is a cost decision, controlled by the
+  # enableDefenderForSql parameter. See RISK-04.
+  - CKV_AZURE_25
